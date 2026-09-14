@@ -296,14 +296,18 @@
   // a real application/json content type triggers one from the browser.
   async function callBackend(action, payload){
     try{
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(BACKEND_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action, ...(payload || {}) })
+        body: JSON.stringify({ action, ...(payload || {}) }),
+        signal: controller.signal
       });
+      clearTimeout(timer);
       return await res.json();
     }catch(err){
-      return { error: 'Could not reach the server. Check your connection and try again.' };
+      return { error: err.name === 'AbortError' ? 'The server took too long to respond. Try again in a moment.' : 'Could not reach the server. Check your connection and try again.' };
     }
   }
 
@@ -356,6 +360,10 @@
   // ---- Wallet discovery (EIP-6963): finds every installed wallet extension
   // (MetaMask, Rabby, Coinbase Wallet, etc.) so the person can pick which one
   // to use, instead of always defaulting to whichever one happens to be first.
+  // Wallet extensions inject themselves at slightly different times, so this
+  // re-asks every time the picker opens rather than relying on a one time
+  // check at page load, which is what caused connections to sometimes miss
+  // a wallet or hang.
   let discoveredWallets = [];
   let activeProvider = null;
 
@@ -367,13 +375,25 @@
   });
   window.dispatchEvent(new Event('eip6963:requestProvider'));
 
-  function connectWallet(){
+  function withTimeout(promise, ms){
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+    ]);
+  }
+
+  async function connectWallet(){
+    // Ask again right now, and give extensions a brief moment to respond,
+    // instead of trusting only whatever was found back at page load.
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+    await new Promise(resolve => setTimeout(resolve, 250));
+
     let wallets = discoveredWallets.slice();
     if(wallets.length === 0 && window.ethereum){
       wallets = [{ info:{ name:'Browser Wallet', icon:'' }, provider: window.ethereum }];
     }
     if(wallets.length === 0){
-      alert('No wallet extension found. Please install MetaMask, Rabby, or another Web3 wallet to continue.');
+      alert('No wallet extension found. Please install MetaMask, Rabby, or another Web3 wallet, then reload the page.');
       return;
     }
     const list = document.getElementById('walletList');
@@ -397,9 +417,11 @@
 
     let accounts;
     try{
-      accounts = await chosen.provider.request({ method: 'eth_requestAccounts' });
+      accounts = await withTimeout(chosen.provider.request({ method: 'eth_requestAccounts' }), 30000);
     }catch(err){
-      alert('Wallet connection was cancelled.');
+      alert(err && err.message === 'timeout'
+        ? 'That wallet took too long to respond. Open its extension window directly, then try connecting again.'
+        : 'Wallet connection was cancelled.');
       return;
     }
 
@@ -415,9 +437,10 @@
   async function disconnectWallet(){
     // Best effort: on wallets that support it (e.g. current MetaMask), this
     // actually revokes the site's access so the next connect asks fresh,
-    // rather than silently reconnecting the same account.
+    // rather than silently reconnecting the same account. Time boxed so an
+    // unsupported wallet can never make Disconnect hang.
     if(activeProvider && activeProvider.request){
-      try{ await activeProvider.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); }catch(err){}
+      try{ await withTimeout(activeProvider.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }), 2000); }catch(err){}
     }
     activeProvider = null;
     walletAddr = '';
@@ -462,16 +485,30 @@
   let indIsRegistered = false;
   let indKnownStatus = null; // 'Under Review' | 'Approved' | 'Rejected'
 
+  let indCheckFailed = false;
+
   async function loadIndividualStatus(){
     const res = await callBackend('get_individual_status', { wallet: walletAddr });
+    indCheckFailed = false;
     if(res && res.status){
       indIsRegistered = true;
       indKnownStatus = res.status;
       indProfile = { username: res.username };
-    }else{
+    }else if(res && res.error === 'Not registered'){
       indIsRegistered = false;
       indKnownStatus = null;
+    }else{
+      // Could not confirm either way (network hiccup, slow backend, etc).
+      // Never fall through to the registration form here — that risks a
+      // duplicate attempt for someone who is actually already registered.
+      indCheckFailed = true;
     }
+  }
+
+  async function retryIndividualCheck(){
+    appBody.innerHTML = '<p class="note">Checking your registration status…</p>';
+    await loadIndividualStatus();
+    render();
   }
 
   function renderIndividual(){
@@ -485,6 +522,14 @@
     }
 
     if(state === 'ind_check'){
+      if(indCheckFailed){
+        setStatus('Connected as ' + shortAddr(walletAddr));
+        appBody.innerHTML = `
+          <p class="msg-error">Could not confirm your registration status. This is likely a slow connection to the server, not a lost registration.</p>
+          <button class="btn" onclick="retryIndividualCheck()">Try again</button>
+        `;
+        return;
+      }
       if(indIsRegistered && indProfile){
         const statusLabel = indKnownStatus;
         const clsMap = { 'Approved':'approved', 'Rejected':'rejected', 'Under Review':'' };
@@ -495,7 +540,7 @@
         };
         setStatus('Hi <b>' + indProfile.username + '</b> &middot; Status: <b>' + statusLabel + '</b>', clsMap[statusLabel] || '');
         appBody.innerHTML = (bodyMap[statusLabel] || '<p>Status unavailable.</p>') + `
-          <button class="btn ghost" onclick="connectWallet()">Refresh status</button>
+          <button class="btn ghost" onclick="retryIndividualCheck()">Refresh status</button>
         `;
         return;
       }
@@ -589,8 +634,11 @@
 
   function capFor(type){ return type === 'x' ? 10 : 20; }
 
+  let mgrCheckFailed = false;
+
   async function loadManagerStatus(){
     const res = await callBackend('get_manager_status', { wallet: walletAddr });
+    mgrCheckFailed = false;
     if(res && res.status){
       mgrIsRegistered = true;
       mgrProfile = { username: res.username };
@@ -598,10 +646,18 @@
       mgrType = res.applicationType;
       mgrSpotsRequested = res.spotsRequested;
       winners = Array.from({length: mgrSpotsRequested || 0}, () => ({wallet:'', x:''}));
-    }else{
+    }else if(res && res.error === 'Not registered'){
       mgrIsRegistered = false;
       mgrReviewStatus = null;
+    }else{
+      mgrCheckFailed = true;
     }
+  }
+
+  async function retryManagerCheck(){
+    appBody.innerHTML = '<p class="note">Checking your application status…</p>';
+    await loadManagerStatus();
+    render();
   }
 
   function renderManager(){
@@ -615,6 +671,14 @@
     }
 
     if(state === 'mgr_check'){
+      if(mgrCheckFailed){
+        setStatus('Connected as ' + shortAddr(walletAddr));
+        appBody.innerHTML = `
+          <p class="msg-error">Could not confirm your application status. This is likely a slow connection to the server, not a lost application.</p>
+          <button class="btn" onclick="retryManagerCheck()">Try again</button>
+        `;
+        return;
+      }
       if(mgrIsRegistered && mgrProfile){
         state = 'mgr_review';
         return renderManager();
@@ -666,7 +730,7 @@
       if(mgrReviewStatus === 'Under Review'){
         appBody.innerHTML = `
           <p>Your application is under manual review. Check back here for a decision.</p>
-          <button class="btn ghost" onclick="connectWallet()">Refresh status</button>
+          <button class="btn ghost" onclick="retryManagerCheck()">Refresh status</button>
         `;
         return;
       }
