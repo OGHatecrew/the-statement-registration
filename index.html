@@ -124,6 +124,17 @@
   .winner-row input{ margin-top:0; }
   .winner-row button{ flex-shrink:0; }
 
+  /* music toggle */
+  #musicToggle{
+    position:fixed; bottom:22px; right:22px; z-index:150;
+    width:44px; height:44px; border-radius:50%;
+    background:rgba(0,0,0,0.55); border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center;
+    color:var(--gold-bright); font-size:16px; cursor:none;
+    backdrop-filter:blur(4px);
+  }
+  #musicToggle:hover{ border-color:var(--gold); }
+
   /* wallet picker */
   #walletPicker{
     position:fixed; inset:0; z-index:200; display:none; align-items:center; justify-content:center;
@@ -156,6 +167,11 @@
 <body>
 
 <div id="goldCursor"></div>
+
+<audio id="bgMusic" loop preload="auto">
+  <source src="background-music.mp4" type="audio/mp4">
+</audio>
+<button type="button" id="musicToggle" onclick="toggleMusic()" aria-label="Toggle background music">&#9835;</button>
 
 <div id="walletPicker">
   <div class="wallet-picker-backdrop" onclick="closeWalletPicker()"></div>
@@ -242,6 +258,34 @@
     card.addEventListener('mouseleave', () => {
       card.style.transform = 'perspective(900px) rotateX(0) rotateY(0)';
     });
+  });
+
+  // ---- background music: loops forever once started. Browsers block audio
+  // with sound from autoplaying before the visitor interacts with the page,
+  // so this tries to autoplay and, if blocked, starts on the first click
+  // anywhere and keeps the floating toggle in sync either way.
+  const bgMusic = document.getElementById('bgMusic');
+  const musicToggle = document.getElementById('musicToggle');
+  bgMusic.volume = 0.5;
+
+  function updateMusicToggleIcon(){
+    musicToggle.innerHTML = bgMusic.paused ? '&#9835;' : '&#10074;&#10074;';
+  }
+
+  function toggleMusic(){
+    if(bgMusic.paused){ bgMusic.play().catch(()=>{}); } else { bgMusic.pause(); }
+  }
+
+  bgMusic.addEventListener('play', updateMusicToggleIcon);
+  bgMusic.addEventListener('pause', updateMusicToggleIcon);
+  updateMusicToggleIcon();
+
+  bgMusic.play().catch(() => {
+    const startOnFirstClick = () => {
+      bgMusic.play().catch(()=>{});
+      document.removeEventListener('click', startOnFirstClick);
+    };
+    document.addEventListener('click', startOnFirstClick);
   });
 
   const PINNED_POST_URL = 'https://x.com/TheStatementNFT';
