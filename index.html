@@ -294,20 +294,38 @@
   // Talks to the Google Apps Script backend. Uses text/plain on purpose:
   // Apps Script doesn't answer CORS preflight requests, and sending JSON with
   // a real application/json content type triggers one from the browser.
-  async function callBackend(action, payload){
+  // Apps Script's own latency is unpredictable (cold starts, its redirect
+  // through googleusercontent.com) and can occasionally take 10-20s+ even
+  // when nothing is actually wrong, so one attempt at 15s was too eager to
+  // give up. This gives it more time, and retries once automatically before
+  // reporting a failure to the user.
+  async function callBackendOnce(action, payload, timeoutMs){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try{
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(BACKEND_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action, ...(payload || {}) }),
         signal: controller.signal
       });
-      clearTimeout(timer);
       return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function callBackend(action, payload){
+    try{
+      return await callBackendOnce(action, payload, 20000);
     }catch(err){
-      return { error: err.name === 'AbortError' ? 'The server took too long to respond. Try again in a moment.' : 'Could not reach the server. Check your connection and try again.' };
+      // First attempt failed (timeout or network blip) — give it one more
+      // try before telling the user anything is wrong.
+      try{
+        return await callBackendOnce(action, payload, 20000);
+      }catch(err2){
+        return { error: err2.name === 'AbortError' ? 'The server took too long to respond. Try again in a moment.' : 'Could not reach the server. Check your connection and try again.' };
+      }
     }
   }
 
@@ -445,8 +463,9 @@
     activeProvider = null;
     walletAddr = '';
     state = 'disconnected';
+    if(mgrCountdownTimer){ clearInterval(mgrCountdownTimer); mgrCountdownTimer = null; }
     indProfile = null; indIsRegistered = false; indKnownStatus = null; indRetweetLink = '';
-    mgrProfile = null; mgrIsRegistered = false; mgrReviewStatus = null; mgrType = null; mgrSpotsRequested = 0; winners = []; raffleResultsLink = '';
+    mgrProfile = null; mgrIsRegistered = false; mgrReviewStatus = null; mgrType = null; mgrSpotsRequested = 0; mgrDeadline = null; winners = []; raffleResultsLink = '';
     disconnectBtn.style.display = 'none';
     render();
   }
@@ -627,10 +646,12 @@
   let mgrProfile = null; // { username, xProfile }
   let mgrType = null; // 'x' | 'discord'
   let mgrSpotsRequested = 0;
-  let mgrReviewStatus = null; // 'Under Review' | 'Approved' | 'Rejected'
+  let mgrReviewStatus = null; // 'Under Review' | 'Approved' | 'Rejected' | 'Expired'
   let winners = [];
   let raffleResultsLink = '';
   let mgrIsRegistered = false;
+  let mgrDeadline = null; // ms epoch — when the 48h submission window closes
+  let mgrCountdownTimer = null;
 
   function capFor(type){ return type === 'x' ? 10 : 20; }
 
@@ -645,6 +666,7 @@
       mgrReviewStatus = res.status;
       mgrType = res.applicationType;
       mgrSpotsRequested = res.spotsRequested;
+      mgrDeadline = res.deadline || null;
       winners = Array.from({length: mgrSpotsRequested || 0}, () => ({wallet:'', x:''}));
     }else if(res && res.error === 'Not registered'){
       mgrIsRegistered = false;
@@ -652,6 +674,36 @@
     }else{
       mgrCheckFailed = true;
     }
+  }
+
+  function formatCountdown(ms){
+    if(ms <= 0) return 'less than a minute';
+    const totalMinutes = Math.floor(ms / 60000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if(hours <= 0) return minutes + ' minute' + (minutes===1?'':'s');
+    return hours + ' hour' + (hours===1?'':'s') + ' ' + minutes + ' minute' + (minutes===1?'':'s');
+  }
+
+  function startMgrCountdown(){
+    if(mgrCountdownTimer) clearInterval(mgrCountdownTimer);
+    const el = document.getElementById('mgrCountdown');
+    if(!el || !mgrDeadline) return;
+    const tick = () => {
+      const remaining = mgrDeadline - Date.now();
+      const target = document.getElementById('mgrCountdown');
+      if(!target){ clearInterval(mgrCountdownTimer); return; }
+      if(remaining <= 0){
+        target.textContent = 'Your submission window has closed.';
+        clearInterval(mgrCountdownTimer);
+        // Re-check so the page flips to the Expired view instead of leaving a stale form up.
+        retryManagerCheck();
+        return;
+      }
+      target.textContent = 'Time left to submit: ' + formatCountdown(remaining);
+    };
+    tick();
+    mgrCountdownTimer = setInterval(tick, 30000);
   }
 
   async function retryManagerCheck(){
@@ -724,7 +776,7 @@
     }
 
     if(state === 'mgr_review'){
-      const clsMap = { 'Under Review':'', 'Approved':'approved', 'Rejected':'rejected' };
+      const clsMap = { 'Under Review':'', 'Approved':'approved', 'Rejected':'rejected', 'Expired':'rejected' };
       setStatus('Status: <b>' + mgrReviewStatus + '</b>', clsMap[mgrReviewStatus] || '');
 
       if(mgrReviewStatus === 'Under Review'){
@@ -740,10 +792,16 @@
         return;
       }
 
+      if(mgrReviewStatus === 'Expired'){
+        appBody.innerHTML = `<p>Your 48 hour window to submit your winner list has closed. If you believe this is a mistake, reach out to us directly.</p>`;
+        return;
+      }
+
       // Approved
       const cap = mgrSpotsRequested;
       appBody.innerHTML = `
         <p>Approved for ${cap} spot${cap===1?'':'s'}. Enter the link to where you hosted your giveaway, then each winner's wallet address and X username below.</p>
+        <p class="note" id="mgrCountdown"><strong>You have 48 hours from approval to submit your winner list.</strong></p>
         <fieldset>
           <label>Link to your giveaway / raffle
             <input id="f_raffleLink" placeholder="https://..." value="${raffleResultsLink}" />
@@ -754,6 +812,7 @@
         <button class="btn" onclick="submitWinners()">Submit Winner List</button>
       `;
       renderWinnerRows();
+      if(mgrDeadline) startMgrCountdown();
       return;
     }
 
