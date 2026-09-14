@@ -175,6 +175,7 @@
 
   <div id="flowWrap" style="display:none;">
     <button class="back" onclick="backToPaths()">&larr; Back</button>
+    <button class="back" id="disconnectBtn" onclick="disconnectWallet()" style="display:none; float:right;">Disconnect Wallet</button>
     <div id="statusLine" class="status"></div>
     <div id="appBody"></div>
   </div>
@@ -288,6 +289,12 @@
     }
     let accounts;
     try{
+      // Forces the account picker every time, so switching to a different
+      // wallet just means choosing a different account here.
+      await window.ethereum.request({
+        method: 'wallet_requestPermissions',
+        params: [{ eth_accounts: {} }]
+      });
       accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
     }catch(err){
       alert('Wallet connection was cancelled.');
@@ -296,11 +303,22 @@
     walletAddr = accounts[0];
     state = path === 'manager' ? 'mgr_check' : 'ind_check';
     appBody.innerHTML = '<p class="note">Checking your registration status…</p>';
+    disconnectBtn.style.display = '';
     if(path === 'manager') await loadManagerStatus(); else await loadIndividualStatus();
     render();
   }
 
+  function disconnectWallet(){
+    walletAddr = '';
+    state = 'disconnected';
+    indProfile = null; indIsRegistered = false; indKnownStatus = null; indRetweetLink = '';
+    mgrProfile = null; mgrIsRegistered = false; mgrReviewStatus = null; mgrType = null; mgrSpotsRequested = 0; winners = []; raffleResultsLink = '';
+    disconnectBtn.style.display = 'none';
+    render();
+  }
+
   const registerNowWrap = document.getElementById('registerNowWrap');
+  const disconnectBtn = document.getElementById('disconnectBtn');
 
   function showPathChoice(){
     registerNowWrap.style.display = 'none';
@@ -311,6 +329,7 @@
     path = null; state = 'disconnected'; walletAddr = '';
     flowWrap.style.display = 'none';
     pathChoice.style.display = '';
+    disconnectBtn.style.display = 'none';
   }
 
   function choosePath(p){
