@@ -299,9 +299,9 @@
   // when nothing is actually wrong, so one attempt at 15s was too eager to
   // give up. This gives it more time, and retries once automatically before
   // reporting a failure to the user.
-  async function callBackendOnce(action, payload, timeoutMs){
+  async function callBackend(action, payload){
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), 12000);
     try{
       const res = await fetch(BACKEND_URL, {
         method: 'POST',
@@ -310,22 +310,10 @@
         signal: controller.signal
       });
       return await res.json();
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async function callBackend(action, payload){
-    try{
-      return await callBackendOnce(action, payload, 20000);
     }catch(err){
-      // First attempt failed (timeout or network blip) — give it one more
-      // try before telling the user anything is wrong.
-      try{
-        return await callBackendOnce(action, payload, 20000);
-      }catch(err2){
-        return { error: err2.name === 'AbortError' ? 'The server took too long to respond. Try again in a moment.' : 'Could not reach the server. Check your connection and try again.' };
-      }
+      return { error: err.name === 'AbortError' ? 'The server took too long to respond. Try again in a moment.' : 'Could not reach the server. Check your connection and try again.' };
+    }finally{
+      clearTimeout(timer);
     }
   }
 
