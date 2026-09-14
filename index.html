@@ -530,22 +530,50 @@
     render();
   }
 
+  function changeIndividualWallet(){
+    walletAddr = '';
+    indProfile = null; indIsRegistered = false; indKnownStatus = null; indRetweetLink = ''; indCheckFailed = false;
+    state = 'disconnected';
+    render();
+  }
+
+  async function submitIndividualWallet(){
+    const val = (document.getElementById('f_indWallet').value || '').trim();
+    const slot = document.getElementById('indWalletMsgSlot');
+    if(!isWalletAddr(val)){
+      if(slot) slot.innerHTML = '<div class="msg-error">Enter a valid wallet address (starts with 0x).</div>';
+      return;
+    }
+    walletAddr = val;
+    state = 'ind_check';
+    appBody.innerHTML = '<p class="note">Checking your registration status…</p>';
+    await loadIndividualStatus();
+    render();
+  }
+
   function renderIndividual(){
     if(state === 'disconnected'){
-      setStatus('Wallet not connected');
+      setStatus('');
       appBody.innerHTML = `
-        <p>Connect your wallet. A signature only, no gas, no permissions.</p>
-        <button class="btn" onclick="connectWallet()">Connect Wallet</button>
+        <p>Paste your wallet address below. No wallet connection needed — enter it to register, or come back and enter it again anytime to check your status.</p>
+        <fieldset>
+          <label>Wallet address
+            <input id="f_indWallet" placeholder="0x..." value="${walletAddr || ''}" />
+          </label>
+        </fieldset>
+        <div id="indWalletMsgSlot"></div>
+        <button class="btn" onclick="submitIndividualWallet()">Continue</button>
       `;
       return;
     }
 
     if(state === 'ind_check'){
       if(indCheckFailed){
-        setStatus('Connected as ' + shortAddr(walletAddr));
+        setStatus('Wallet: ' + shortAddr(walletAddr));
         appBody.innerHTML = `
           <p class="msg-error">Could not confirm your registration status. This is likely a slow connection to the server, not a lost registration.</p>
           <button class="btn" onclick="retryIndividualCheck()">Try again</button>
+          <button class="btn ghost" onclick="changeIndividualWallet()">Use a different wallet address</button>
         `;
         return;
       }
@@ -560,10 +588,11 @@
         setStatus('Hi <b>' + indProfile.username + '</b> &middot; Status: <b>' + statusLabel + '</b>', clsMap[statusLabel] || '');
         appBody.innerHTML = (bodyMap[statusLabel] || '<p>Status unavailable.</p>') + `
           <button class="btn ghost" onclick="retryIndividualCheck()">Refresh status</button>
+          <button class="btn ghost" onclick="changeIndividualWallet()">Use a different wallet address</button>
         `;
         return;
       }
-      setStatus('Connected as ' + shortAddr(walletAddr));
+      setStatus('Wallet: ' + shortAddr(walletAddr));
       appBody.innerHTML = `
         <fieldset>
           <label>X username
@@ -574,12 +603,13 @@
           </label>
         </fieldset>
         <button class="btn" onclick="submitIndividualProfile()">Continue</button>
+        <button class="btn ghost" onclick="changeIndividualWallet()">Use a different wallet address</button>
       `;
       return;
     }
 
     if(state === 'ind_task'){
-      setStatus('Connected as ' + shortAddr(walletAddr));
+      setStatus('Wallet: ' + shortAddr(walletAddr));
       appBody.innerHTML = `
         <p>Wallet registering: <b>${shortAddr(walletAddr)}</b></p>
         <p>Like and comment on our pinned post, then quote retweet it and paste the link below.</p>
@@ -598,7 +628,10 @@
 
     if(state === 'ind_done'){
       setStatus('Registered');
-      appBody.innerHTML = `<p>You're registered, ${indProfile.username}. Come back and reconnect anytime to check your status.</p>`;
+      appBody.innerHTML = `
+        <p>You're registered, ${indProfile.username}. Come back anytime and paste your wallet address again to check your status.</p>
+        <button class="btn ghost" onclick="changeIndividualWallet()">Check another wallet address</button>
+      `;
       return;
     }
   }
