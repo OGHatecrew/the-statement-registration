@@ -124,6 +124,24 @@
   .winner-row input{ margin-top:0; }
   .winner-row button{ flex-shrink:0; }
 
+  /* wallet picker */
+  #walletPicker{
+    position:fixed; inset:0; z-index:200; display:none; align-items:center; justify-content:center;
+  }
+  .wallet-picker-backdrop{ position:absolute; inset:0; background:rgba(0,0,0,0.7); }
+  .wallet-picker-box{
+    position:relative; background:#0a0a0a; border:1px solid var(--line); border-radius:10px;
+    padding:24px; width:280px; max-width:90vw;
+  }
+  .wallet-picker-box h3{ font-size:12px; font-weight:500; margin:0 0 16px; text-align:center; }
+  .wallet-option{
+    display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+    background:rgba(255,255,255,0.03); border:1px solid var(--line-soft); border-radius:6px;
+    padding:12px 14px; margin-bottom:8px; color:var(--text); font-family:'Michroma'; font-size:11px;
+  }
+  .wallet-option:hover{ border-color:var(--gold); }
+  .wallet-option img{ width:20px; height:20px; border-radius:4px; flex-shrink:0; }
+
   /* custom 3D gold cursor */
   #goldCursor{
     position:fixed; top:0; left:0; width:16px; height:16px; pointer-events:none; z-index:9999;
@@ -138,6 +156,15 @@
 <body>
 
 <div id="goldCursor"></div>
+
+<div id="walletPicker">
+  <div class="wallet-picker-backdrop" onclick="closeWalletPicker()"></div>
+  <div class="wallet-picker-box">
+    <h3>Choose a wallet</h3>
+    <div id="walletList"></div>
+    <button class="back" onclick="closeWalletPicker()" style="display:block; margin:8px auto 0;">Cancel</button>
+  </div>
+</div>
 
 <div class="wrap">
   <div class="header">
@@ -282,24 +309,57 @@
   function isWalletAddr(v){ return /^0x[a-fA-F0-9]{40}$/.test(v.trim()); }
   function isUrl(v){ try{ new URL(v.trim()); return true; }catch(e){ return false; } }
 
-  async function connectWallet(){
-    if(!window.ethereum){
-      alert('No wallet extension found. Please install MetaMask (or another Web3 wallet) to continue.');
+  // ---- Wallet discovery (EIP-6963): finds every installed wallet extension
+  // (MetaMask, Rabby, Coinbase Wallet, etc.) so the person can pick which one
+  // to use, instead of always defaulting to whichever one happens to be first.
+  let discoveredWallets = [];
+  let activeProvider = null;
+
+  window.addEventListener('eip6963:announceProvider', (event) => {
+    const detail = event.detail;
+    if(detail && detail.info && !discoveredWallets.some(w => w.info.uuid === detail.info.uuid)){
+      discoveredWallets.push(detail);
+    }
+  });
+  window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+  function connectWallet(){
+    let wallets = discoveredWallets.slice();
+    if(wallets.length === 0 && window.ethereum){
+      wallets = [{ info:{ name:'Browser Wallet', icon:'' }, provider: window.ethereum }];
+    }
+    if(wallets.length === 0){
+      alert('No wallet extension found. Please install MetaMask, Rabby, or another Web3 wallet to continue.');
       return;
     }
+    const list = document.getElementById('walletList');
+    window._walletChoices = wallets;
+    list.innerHTML = wallets.map((w, i) => `
+      <button type="button" class="wallet-option" onclick="selectWallet(${i})">
+        ${w.info.icon ? `<img src="${w.info.icon}" alt="" />` : ''}
+        <span>${w.info.name}</span>
+      </button>
+    `).join('');
+    document.getElementById('walletPicker').style.display = 'flex';
+  }
+
+  function closeWalletPicker(){
+    document.getElementById('walletPicker').style.display = 'none';
+  }
+
+  async function selectWallet(i){
+    const chosen = window._walletChoices[i];
+    closeWalletPicker();
+
     let accounts;
     try{
-      // Forces the account picker every time, so switching to a different
-      // wallet just means choosing a different account here.
-      await window.ethereum.request({
-        method: 'wallet_requestPermissions',
-        params: [{ eth_accounts: {} }]
-      });
-      accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      accounts = await chosen.provider.request({ method: 'eth_requestAccounts' });
     }catch(err){
       alert('Wallet connection was cancelled.');
       return;
     }
+
+    activeProvider = chosen.provider;
     walletAddr = accounts[0];
     state = path === 'manager' ? 'mgr_check' : 'ind_check';
     appBody.innerHTML = '<p class="note">Checking your registration status…</p>';
@@ -308,7 +368,14 @@
     render();
   }
 
-  function disconnectWallet(){
+  async function disconnectWallet(){
+    // Best effort: on wallets that support it (e.g. current MetaMask), this
+    // actually revokes the site's access so the next connect asks fresh,
+    // rather than silently reconnecting the same account.
+    if(activeProvider && activeProvider.request){
+      try{ await activeProvider.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }); }catch(err){}
+    }
+    activeProvider = null;
     walletAddr = '';
     state = 'disconnected';
     indProfile = null; indIsRegistered = false; indKnownStatus = null; indRetweetLink = '';
